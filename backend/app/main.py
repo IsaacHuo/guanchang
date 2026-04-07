@@ -191,16 +191,18 @@ def get_recent_officials():
 
 @app.get("/api/officials/search")
 def search_officials(query_name: str):
-    """根据姓名进行模糊搜索"""
+    """根据姓名、职务或违纪事件进行模糊检索"""
     query = """
     MATCH (o:Official)
-    WHERE o.name CONTAINS $query_name
     OPTIONAL MATCH (o)-[:HELD_POSITION]->(p:Position)
     OPTIONAL MATCH (o)-[:INVESTIGATED_FOR]->(e:Event)
+    WITH o, collect(DISTINCT p.title) AS titles, collect(DISTINCT e.description) AS investigations
+    WHERE o.name CONTAINS $query_name 
+       OR any(t IN titles WHERE t CONTAINS $query_name)
+       OR any(evt IN investigations WHERE evt CONTAINS $query_name)
     RETURN o.name AS name, o.gender AS gender, o.birth_date AS birth_date,
            o.identifier AS identifier, o.created_at AS created_at,
-           collect(DISTINCT p.title) AS titles,
-           collect(DISTINCT e.description) AS investigations
+           titles, investigations
     ORDER BY created_at DESC
     LIMIT 20
     """
@@ -218,6 +220,38 @@ def search_officials(query_name: str):
             "investigations": record['investigations']
         })
     return {"officials": officials}
+
+@app.get("/api/officials/profile/{name}")
+def get_official_profile(name: str):
+    """获取某个官员的个人详细档案、时间轴等微观数据"""
+    query = """
+    MATCH (o:Official {name: $name})
+    OPTIONAL MATCH (o)-[r1:HELD_POSITION]->(p:Position)
+    OPTIONAL MATCH (o)-[r2:INVESTIGATED_FOR]->(e:Event)
+    RETURN o.name AS name, o.gender AS gender, o.birth_date AS birth_date,
+           o.identifier AS identifier,
+           collect(DISTINCT {title: p.title, start_date: r1.start_date, end_date: r1.end_date, organization: r1.organization}) AS career,
+           collect(DISTINCT {description: e.description, date: r2.date}) AS events
+    """
+    from app.core.database import db_conn
+    result = db_conn.query(query, parameters={"name": name})
+    if not result:
+        raise HTTPException(status_code=404, detail="Official not found")
+        
+    record = result[0]
+    
+    # 按照时间稍微排序一下 career
+    career_list = [c for c in record['career'] if c.get('title')]
+    events_list = [e for e in record['events'] if e.get('description')]
+    
+    return {
+        "name": record['name'],
+        "gender": record['gender'],
+        "birth_date": record['birth_date'],
+        "identifier": record['identifier'],
+        "career": career_list,
+        "events": events_list
+    }
 
 @app.get("/api/graph/network")
 def get_graph_network():
